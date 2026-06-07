@@ -1,0 +1,109 @@
+name: A2A Bridge - Agent-to-Agent coordination
+
+on:
+  repository_dispatch:
+    types: [agent_request]
+  workflow_dispatch:
+    inputs:
+      request:
+        description: 'What do you need from me?'
+        required: true
+        type: string
+      from_agent:
+        description: 'Who is asking?'
+        required: false
+        type: string
+        default: 'human'
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  issues: write
+  repository-projects: write
+
+jobs:
+  route-request:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log incoming A2A request
+        run: |
+          echo "📨 A2A request from ${{ github.event.client_payload.from_agent || 'human' }}"
+          echo "Request: ${{ github.event.client_payload.request || github.event.inputs.request }}"
+          echo "Type: ${{ github.event.action }}"
+
+      - name: Route to right handler based on request type
+        id: route
+        run: |
+          REQUEST="${{ github.event.client_payload.request || github.event.inputs.request }}"
+          if [[ "$REQUEST" == *security* ]] || [[ "$REQUEST" == *audit* ]] || [[ "$REQUEST" == *scan* ]]; then
+            echo "handler=security" >> $GITHUB_OUTPUT
+          elif [[ "$REQUEST" == *deploy* ]] || [[ "$REQUEST" == *release* ]]; then
+            echo "handler=deploy" >> $GITHUB_OUTPUT
+          elif [[ "$REQUEST" == *test* ]] || [[ "$REQUEST" == *check* ]]; then
+            echo "handler=test" >> $GITHUB_OUTPUT
+          else
+            echo "handler=general" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Security handler - scan deps
+        if: steps.route.outputs.handler == 'security'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Check open security alerts
+            const alerts = await github.rest.dependabot.listAlertsForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 10
+            });
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title: `[A2A] Security audit complete - ${alerts.data.length} open alerts`,
+              body: alerts.data.map(a => `- **${a.security_advisory.ghsa_id}** (${a.security_advisory.severity}): ${a.security_advisory.summary}`).join('\n') || 'No open alerts.',
+              labels: ['a2a-response', 'security']
+            });
+
+      - name: Deploy handler - trigger deployment
+        if: steps.route.outputs.handler == 'deploy'
+        run: |
+          echo "🚀 Deploy request received - dispatching to deploy agent"
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d '{"event_type": "deploy_request", "client_payload": {"source": "a2a-bridge"}}'
+
+      - name: Test handler - run CI
+        if: steps.route.outputs.handler == 'test'
+        run: |
+          echo "🧪 Test request received - this would trigger CI"
+          echo "Manual test: gh workflow run ci.yml"
+
+      - name: General handler - log for human review
+        if: steps.route.outputs.handler == 'general'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title: `[A2A] Request received: ${{ github.event.client_payload.request || github.event.inputs.request }}`,
+              body: 'From: `${{ github.event.client_payload.from_agent || "human" }}`\n\nThis needs human triage - the request didn\'t match a known handler.',
+              labels: ['a2a-request', 'needs-human']
+            });
+
+      - name: Reply to caller
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const caller = context.payload.client_payload?.reply_to;
+            if (caller) {
+              await github.rest.repos.createDispatchEvent({
+                owner: caller.split('/')[0],
+                repo: caller.split('/')[1],
+                event_type: 'agent_response',
+                client_payload: {
+                  source_repo: context.repo.repo,
+                  request_id: context.payload.client_payload?.request_id,
+                  result: `Routed to ${process.env.HANDLER || 'general'} handler`
+                }
+              });
+            }
