@@ -1,0 +1,4 @@
+# CODEOWNERS - muffy86 must approve all changes
+# This blocks the Copilot Coding Agent from auto-merging anything.
+* @muffy86
+/.github/ @muffy86
