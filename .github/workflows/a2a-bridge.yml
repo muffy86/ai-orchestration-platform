@@ -21,11 +21,11 @@ permissions:
   pull-requests: write
   actions: read
   security-events: read
-  dependabot-secrets: read
 
 jobs:
   handle:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Parse request
         id: parse
@@ -41,12 +41,13 @@ jobs:
         run: |
           echo ":envelope: A2A from ${{ steps.parse.outputs.from }}"
           echo "Request: ${{ steps.parse.outputs.request }}"
-      - name: Security scan (Dependabot + Code scanning)
+      - name: Security scan
         if: |
           contains(steps.parse.outputs.request, 'security') ||
           contains(steps.parse.outputs.request, 'audit') ||
           contains(steps.parse.outputs.request, 'scan')
         uses: actions/github-script@v7
+        continue-on-error: true
         with:
           script: |
             const summary = ['*Security audit for ' + context.repo.repo + '*'];
@@ -56,19 +57,19 @@ jobs:
               });
               summary.push('## Dependabot alerts: ' + alerts.data.length);
               alerts.data.forEach(a => summary.push('- **' + a.security_advisory.ghsa_id + '** (' + a.security_advisory.severity + '): ' + a.security_advisory.summary));
-            } catch (e) { summary.push('## Dependabot alerts: (no access - ' + e.status + ')'); }
+            } catch (e) { summary.push('## Dependabot alerts: ' + e.status); }
             try {
               const codeAlerts = await github.rest.codeScanning.listAlertsForRepo({
                 owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 5
               });
               summary.push('## Code scanning alerts: ' + codeAlerts.data.length);
-            } catch (e) { summary.push('## Code scanning alerts: (no access)'); }
+            } catch (e) { summary.push('## Code scanning: ' + e.status); }
             try {
               const secAlerts = await github.rest.secretScanning.listAlertsForRepo({
                 owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 5
               });
               summary.push('## Secret scanning alerts: ' + secAlerts.data.length);
-            } catch (e) { summary.push('## Secret scanning alerts: (no access)'); }
+            } catch (e) { summary.push('## Secret scanning: ' + e.status); }
             await github.rest.issues.create({
               owner: context.repo.owner, repo: context.repo.repo,
               title: '[A2A] Security audit: ' + context.repo.repo,
@@ -78,7 +79,7 @@ jobs:
       - name: Deploy handler
         if: contains(steps.parse.outputs.request, 'deploy') || contains(steps.parse.outputs.request, 'release')
         run: |
-          echo ":rocket: Deploy request - trigger deployment"
+          echo ":rocket: Deploy request - would trigger deployment"
       - name: Test handler
         if: contains(steps.parse.outputs.request, 'test') || contains(steps.parse.outputs.request, 'check')
         run: |
@@ -91,4 +92,4 @@ jobs:
           !contains(steps.parse.outputs.request, 'deploy') &&
           !contains(steps.parse.outputs.request, 'test')
         run: |
-          echo "Request type not handled: ${{ steps.parse.outputs.request }}"
+          echo ":question: Request type not handled: ${{ steps.parse.outputs.request }}"
